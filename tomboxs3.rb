@@ -10,18 +10,7 @@ MANIFEST_FILE_PATH = "#{MAGIC_DIR_PATH}/#{MANIFEST_FILE_NAME}".freeze
 
 class Tomboxs3
 
-  def execute()
-    # # init_manifest_file unless manifest.present?
-    # pp BUCKET_NAME
-    # pp REGION
-    # pp MAGIC_DIR_PATH
-    # pp MANIFEST_FILE_NAME
-    # pp MANIFEST_FILE_PATH
-
-    connect_to_bucket(REGION, BUCKET_NAME)
-  end
-
-  def connect_to_bucket(region, bucket_name)
+  def initialize(region, bucket_name)
     # pp "CONNECT TO BUCKET"
     # # load credentials from disk
     # creds = YAML.load(File.read('creds.yml'))
@@ -31,131 +20,124 @@ class Tomboxs3
     #   secret_access_key: creds['secret_access_key']
     # )
 
-    @s3 = Aws::S3::Resource.new(
-      # access_key_id: creds['access_key_id'],
-      # secret_access_key: creds['secret_access_key'],
-      region: region
-    )
-
-    @bucket = @s3.bucket(bucket_name) #if @s3.present? # 'my-bucket'
+    connect_to_s3_bucket(region, bucket_name)
   end
 
-  # def print_files_in_s3_bucket()# Show only the first 50 items
-  #   pp "PRINT FILES IN S3 BUCKET"
-  #   index = 1
-  #   @bucket.objects.each do |item|
-  #     s3obj = item.get
-  #     puts "#{index}:  #{item.key}"
-  #     puts "        metadata:   #{s3obj.metadata}"
-  #     # puts "        md5:   #{item.etag}"
-  #     # puts "        URL:   #{item.presigned_url(:get)}"
-  #     # puts "        Bucket:   #{item.bucket}"
-  #     #validate_against_local(item)
+  def perform_sync
+    pp "TOMBOXS3 SYNC START #{Time.now}"
+    pp ""
 
-  #     index+=1
-  #   end
-  # end
+    files_hash = determine_file_changes
+    new_files = determine_new_files_in_local_dir
 
-  def find_file_in_s3_bucket(filename)
-    #remote_file = @bucket.objects[filename]
-
-    remote_file = nil
-    @bucket.objects.each do |curr_file|
-      pp filename
-      pp curr_file.key
-      if filename == curr_file.key
-        s3obj = curr_file.get
-        puts "REMOTE FILE:  #{curr_file.key}"
-        puts "        metadata:   #{s3obj.metadata}"
-        return [curr_file, s3obj]
-      end
-    end
-    [nil, nil]
-  end
-
-  def validate_against_local(item)
-    #manifest.
-  end
-
-  # def download_item_from_remote(key)
-  #   item = @bucket.object(key)
-  #   ite.get(response_target: "#{MAGIC_DIR_PATH}/#{key}")
-  # end
-
-  def manifest_item(key)
-   a = manifest_items.find {|item| item['name'] == key}
-   pp "AAAA"
-   pp a
-   pp "BBBB"
-
-   a
-  end
-
-  def manifest_items
-    manifest["data"]
-  end
-
-  def manifest
-    begin
-      @manifest ||= JSON.load(File.open(MANIFEST_FILE_PATH))
-    rescue => exception
-      return nil
-    end
-  end
-
-  def init_manifest_file
-    FileUtils.cp("s3_manifest_template.json", MANIFEST_PATH)
-    manifest
-  end
-
-  def generate_manifest_from_dir_contents
-    existing_files = []
-    new_files = []
-    files_in_dir = []
-    files_to_update = []
-    
-    pp "GENERATE MANIFEST FROM MAGIC DIR"
-    index = 1
-    Dir.foreach(MAGIC_DIR_PATH) do |filename|
-      next if filename == '.' or filename == '..' or filename == MANIFEST_FILE_NAME
-      puts "#{index}.  #{filename}"
-      # puts "        md5:   #{generate_md5_local_file(filename)}"
-
-      file_array = find_file_in_s3_bucket(filename)
-      file = file_array[0]
-      s3obj = file_array[1]
-
-      !file.nil? ? existing_files << filename : new_files << filename
-      files_in_dir << filename
-
-      if !s3obj.nil?
-        local_md5 = manifest_item(filename)["md5"]
-        remote_md5 = s3obj.metadata["md5"]
-
-        pp "Local md5  = #{local_md5}"
-        pp "Remote md5 = #{remote_md5}"
-        file_updated = local_md5  != remote_md5
-
-        files_to_update << filename if file_updated
-      end
-
-      index+=1
-    end
-
-    pp "FILES IN DIR"
-    pp files_in_dir
-    pp "EXISTING FILES"
-    pp existing_files
-    pp "NEW FILES"
+    pp "New Files to upload"
     pp new_files
-    pp "FILES TO UPDATE"
-    pp files_to_update
 
-    add_files_to_manifest(files_in_dir) #existing_files + new_fles)
+    pp "Files to update"
+    pp files_hash[:files_to_update]
+
+    pp "Files to delete"
+    pp files_hash[:files_to_delete]
+
+    # SYNC S3
+    pp "S3 Calls Start"
     upload_new_files(new_files) if new_files.any?
-    update_files(files_to_update) if files_to_update.any?
+    update_files(files_hash[:files_to_update]) if files_hash[:files_to_update].any?
+    delete_files(files_hash[:files_to_delete]) if files_hash[:files_to_delete].any?
+    pp "S3 Calls End"
+
+    # Update manifest
+    pp "Regenerate local manifest"
+    add_files_to_manifest(files_hash[:files_in_dir] + new_files)
+
+    pp ""
+    pp "TOMBOXS3 SYNC COMPLETE #{Time.now}"
   end
 
+  private
+
+  ########## SYNC ##########
+  def determine_file_changes
+    files_in_dir = [] # NOTE: stores all files that exist locally
+    existing_files = [] # NOTE: Stores all filenames that have been synced before (exist locally & in s3)
+    files_to_update = [] # NOTE: Stores all filenames that exist locally & remotely with different md5 values
+    # new_files = [] # NOTE: Stores all filenames that exist locally but not remotely
+    files_to_delete = []
+    
+    idx = 1
+    manifest_items.each do |manifest_hash|
+      filename = manifest_hash["name"]
+      # puts "#{idx}.  #{filename}"
+
+      local_file_data = find_file_local_dir(filename)
+
+      if local_file_data[:file_found_local_dir]
+        files_in_dir << filename
+      else
+        files_to_delete << filename
+      end
+
+      s3_data = find_file_in_s3_bucket(filename)
+
+      if s3_data[:found_in_s3]
+        s3_file = s3_data[:s3_file]
+        s3obj = s3_data[:s3obj]
+        existing_files << filename
+        files_to_update << filename if file_updated?(manifest_hash["md5"], s3obj.metadata["md5"])
+      else
+        # IF NOT FOUND IN S3 BUT EXISTS IN MANIFEST THEN IT MUST HAVE BEEN DELETED ON S3
+        # TODO: Implement local delete based on remote change
+      end
+
+      idx+=1
+    end
+
+    return {
+      files_in_dir: files_in_dir,
+      existing_files: existing_files,
+      # new_files: new_files,
+      files_to_update: files_to_update,
+      files_to_delete: files_to_delete
+    }
+  end
+
+  def determine_new_files_in_local_dir
+    new_files = []
+
+    Dir.foreach(MAGIC_DIR_PATH) do |filename|
+      next if filename == '.' ||
+              filename == '..' ||
+              filename == MANIFEST_FILE_NAME ||
+              filename.start_with?('.')
+
+      manifest_file = manifest_item(filename)
+      new_files << filename if manifest_file.nil?
+    end
+
+    new_files
+  end
+
+  def find_file_local_dir(filename)
+    file = nil
+    begin
+      file = File.open("#{MAGIC_DIR_PATH}/#{filename}")
+    rescue
+      pp "COULDNT FIND FILE LOCALLY"
+    end
+
+    {
+      file: file,
+      file_found_local_dir: !file.nil?
+    }
+  end
+
+  def file_updated?(local_md5, remote_md5)
+    # pp "Local md5  = #{local_md5}"
+    # pp "Remote md5 = #{remote_md5}"
+    local_md5  != remote_md5
+  end
+
+  ########## MANIFEST ##########
   def add_files_to_manifest(files)
     json_array = []
     files.each do |curr_file|
@@ -165,44 +147,105 @@ class Tomboxs3
       }
     end
 
-    pp "MANIFEST DATA"
+    # pp "MANIFEST DATA"
     manifest_data = {
       data: json_array
     }
-    pp manifest_data
+    # pp manifest_data
 
     File.write(MANIFEST_FILE_PATH, JSON.pretty_generate(manifest_data)) #manifest_data.to_json)
   end
 
+  def manifest_item(key)
+    manifest_items.find {|item| item["name"] == key}
+  end
+ 
+  def manifest_items
+    # pp "MANIFEST ITEMS"
+    # pp manifest
+    manifest["data"]
+  end
+ 
+  def manifest
+    begin
+      @manifest ||= JSON.load(File.open(MANIFEST_FILE_PATH))
+    rescue => exception
+      return nil
+    end
+  end
+
+  ########## S3 ##########
+  def connect_to_s3_bucket(region, bucket_name)
+    @s3 = Aws::S3::Resource.new(
+      # access_key_id: creds['access_key_id'],
+      # secret_access_key: creds['secret_access_key'],
+      region: region
+    )
+
+    @bucket = @s3.bucket(bucket_name) #if @s3.present? # 'my-bucket'
+  end
+
+  def find_file_in_s3_bucket(filename)
+    remote_file = nil
+    @bucket.objects.each do |curr_file|
+      # pp filename
+      # pp curr_file.key
+      if filename == curr_file.key
+        s3obj = curr_file.get
+        # puts "REMOTE FILE:  #{curr_file.key}"
+        # puts "        metadata:   #{s3obj.metadata}"
+
+        return {
+          s3_file: curr_file,
+          s3obj: s3obj,
+          found_in_s3: true
+        }
+      end
+    end
+    {s3_file: nil, s3obj: nil, found_in_s3: false}
+  end
 
   def upload_new_files(new_files)
-    pp "UPLOAD NEW"
+    # pp "UPLOAD NEW"
     new_files.each do |file|
+      pp "-- Uploading new file #{file} to s3"
       upload_file(file)
     end
   end
 
   def update_files(files_to_update)
-    pp "UPDATE EXISTING"
+    # pp "UPDATE EXISTING"
     files_to_update.each do |file|
+      pp "-- Updating file #{file} on s3"
       upload_file(file)
     end
   end
 
   def upload_file(filename)
-    
-    pp filename
+    # pp filename
     # Create the object to upload
     obj = @bucket.object(filename)
 
     # Metadata to add
     metadata = {
-      "md5": generate_md5_local_file(filename),
+      "md5": generate_md5_local_file(filename)
     }
 
     # Upload it  
-    pp "UPLOAD"    
+    # pp "UPLOAD"
     obj.upload_file("#{MAGIC_DIR_PATH}/#{filename}", metadata: metadata)
+  end
+
+  def delete_files(files_to_delete)
+    # TODO
+    files_to_delete.each do |file| 
+      puts "--  Deleting file #{file} on s3"
+      delete_file(file)
+    end
+  end
+
+  def delete_file(filename)
+    obj = @bucket.object(filename).delete
   end
 
   def generate_md5_local_file(filename)
@@ -211,12 +254,7 @@ class Tomboxs3
     sha256 = Digest::SHA256.file file
     sha256.hexdigest
   end
-
 end # end class
 
-
-box = Tomboxs3.new
-
-box.execute
-# box.print_files_in_s3_bucket
-box.generate_manifest_from_dir_contents
+box = Tomboxs3.new(REGION, BUCKET_NAME)
+box.perform_sync
