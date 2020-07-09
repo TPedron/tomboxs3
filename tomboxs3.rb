@@ -186,23 +186,14 @@ class Tomboxs3
   end
 
   def find_file_in_s3_bucket(filename)
-    remote_file = nil
-    @bucket.objects.each do |curr_file|
-      # pp filename
-      # pp curr_file.key
-      if filename == curr_file.key
-        s3obj = curr_file.get
-        # puts "REMOTE FILE:  #{curr_file.key}"
-        # puts "        metadata:   #{s3obj.metadata}"
+    curr_file = @bucket.object(filename)
+    s3obj = curr_file.get if !curr_file.nil?
 
-        return {
-          s3_file: curr_file,
-          s3obj: s3obj,
-          found_in_s3: true
-        }
-      end
-    end
-    {s3_file: nil, s3obj: nil, found_in_s3: false}
+    {
+      s3_file: curr_file,
+      s3obj: s3obj,
+      found_in_s3: !s3obj.nil?
+    }
   end
 
   def upload_new_files(new_files)
