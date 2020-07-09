@@ -48,7 +48,7 @@ class Tomboxs3
 
     # Update manifest
     pp "Regenerate local manifest"
-    add_files_to_manifest(files_hash[:files_in_dir] + new_files)
+    regenerate_local_manifest(files_hash[:files_in_dir] + new_files)
 
     pp ""
     pp "TOMBOXS3 SYNC COMPLETE #{Time.now}"
@@ -138,18 +138,33 @@ class Tomboxs3
   end
 
   ########## MANIFEST ##########
-  def add_files_to_manifest(files)
+  def regenerate_local_manifest(files)
     json_array = []
     files.each do |curr_file|
+      s3_item = @bucket.object(curr_file)
       json_array << {
         name: curr_file,
-        md5: generate_md5_local_file(curr_file)
+        md5: generate_md5_local_file(curr_file),
+        paths: {
+          local_full_path: "#{MAGIC_DIR_PATH}/#{curr_file}",
+          local_relative_path: "/#{curr_file}",
+        },
+        s3_data: {
+          s3_url: s3_item.presigned_url(:get),
+          s3_bucket: s3_item.bucket_name,
+          s3_etag: s3_item.etag,
+          s3_last_modified: s3_item.last_modified,
+          s3_size: s3_item.size,
+          s3_storage_class: s3_item.storage_class
+        }
       }
     end
 
     # pp "MANIFEST DATA"
     manifest_data = {
-      data: json_array
+      most_recent_sync_time: Time.now,
+      num_files: json_array.length,
+      files: json_array
     }
     # pp manifest_data
 
@@ -163,7 +178,7 @@ class Tomboxs3
   def manifest_items
     # pp "MANIFEST ITEMS"
     # pp manifest
-    manifest["data"]
+    manifest["files"]
   end
  
   def manifest
