@@ -1,57 +1,78 @@
 require 'aws-sdk-s3'
 require "json"
 require 'fileutils'
+require 'listen'
 
-BUCKET_NAME = ENV["TOMBOXS3_BUCKET_NAME"] || "tomboxs3"
-REGION  = ENV["TOMBOXS3_REGION"] || "ca-central-1" # canada
-MANIFEST_FILE_NAME = ENV["MANIFEST_FILE_NAME"] || "s3_manifest.json"
-MAGIC_DIR_PATH = ENV["TOMBOXS3_MAGIC_DIR_PATH"] || "/Users/tompedron/Downloads/tomboxs3_magic_dir"
+BUCKET_NAME = ENV["TOMBOXS3_BUCKET_NAME"] # Required
+REGION  = ENV["TOMBOXS3_REGION"] # Required
+MAGIC_DIR_PATH = ENV["TOMBOXS3_MAGIC_DIR_PATH"] # Required
+MANIFEST_FILE_NAME = ENV["MANIFEST_FILE_NAME"] || "s3_manifest.json" # Optional
 MANIFEST_FILE_PATH = "#{MAGIC_DIR_PATH}/#{MANIFEST_FILE_NAME}".freeze
+DEBUG_LOGGING = ENV["DEBUG_LOGGING"] || "FALSE" # Optional
 
 class Tomboxs3
 
   def initialize(region, bucket_name)
-    # pp "CONNECT TO BUCKET"
-    # # load credentials from disk
-    # creds = YAML.load(File.read('creds.yml'))
-
-    # Aws::S3::Client.new(
-    #   access_key_id: creds['access_key_id'],
-    #   secret_access_key: creds['secret_access_key']
-    # )
-
+    validate_env_vars
     connect_to_s3_bucket(region, bucket_name)
   end
 
-  def perform_sync
-    pp "TOMBOXS3 SYNC START #{Time.now}"
-    pp ""
+  def validate_env_vars
+    raise "ENV EXCEPTION - BUCKET_NAME" if BUCKET_NAME.nil?
+    raise "ENV EXCEPTION - REGION" if REGION.nil?
+    raise "ENV EXCEPTION - MAGIC_DIR_PATH" if MAGIC_DIR_PATH.nil?
+  end
 
+  def monitor
+    listener = Listen.to(MAGIC_DIR_PATH) do
+      pp "TOMBOXS3 SYNC START #{start = Time.now}"
+      perform_sync
+      pp "TOMBOXS3 SYNC COMPLETE #{finish = Time.now} - Total time: #{finish - start} sec."
+    end
+
+    listener.start
+    listener.ignore /#{MANIFEST_FILE_NAME}/ # if we don't ignore this, we infinitely loop on the dir being changed
+    pp "MONITOR DIR #{MAGIC_DIR_PATH}"
+    sleep
+  end
+
+  def log(msg)
+    pp msg unless DEBUG_LOGGING == "FALSE"
+  end
+
+  def perform_sync
     files_hash = determine_file_changes
     new_files = determine_new_files_in_local_dir
 
-    pp "New Files to upload"
-    pp new_files
+    log("New Files to upload")
+    log(new_files)
 
-    pp "Files to update"
-    pp files_hash[:files_to_update]
+    log("Files to update")
+    log(files_hash[:files_to_update])
 
-    pp "Files to delete"
-    pp files_hash[:files_to_delete]
+    log("Files to delete")
+    log(files_hash[:files_to_delete])
 
     # SYNC S3
-    pp "S3 Calls Start"
+    log("S3 Calls Start")
     upload_new_files(new_files) if new_files.any?
     update_files(files_hash[:files_to_update]) if files_hash[:files_to_update].any?
     delete_files(files_hash[:files_to_delete]) if files_hash[:files_to_delete].any?
-    pp "S3 Calls End"
+    log("S3 Calls End")
 
     # Update manifest
-    pp "Regenerate local manifest"
+    log("Regenerate local manifest")
     regenerate_local_manifest(files_hash[:files_in_dir] + new_files)
+  end
 
-    pp ""
-    pp "TOMBOXS3 SYNC COMPLETE #{Time.now}"
+  def print_all_files_in_s3
+    log("PRINT FILES IN S3 BUCKET")
+    index = 1
+    @bucket.objects.each do |item|
+      s3obj = item.get
+      log("#{index}:  #{item.key}")
+      index+=1
+    end
   end
 
   private
@@ -67,7 +88,6 @@ class Tomboxs3
     idx = 1
     manifest_items.each do |manifest_hash|
       filename = manifest_hash["name"]
-      # puts "#{idx}.  #{filename}"
 
       local_file_data = find_file_local_dir(filename)
 
@@ -122,7 +142,7 @@ class Tomboxs3
     begin
       file = File.open("#{MAGIC_DIR_PATH}/#{filename}")
     rescue
-      pp "COULDNT FIND FILE LOCALLY"
+      log("COULDNT FIND FILE LOCALLY")
     end
 
     {
@@ -132,8 +152,8 @@ class Tomboxs3
   end
 
   def file_updated?(local_md5, remote_md5)
-    # pp "Local md5  = #{local_md5}"
-    # pp "Remote md5 = #{remote_md5}"
+    log("Local md5  = #{local_md5}")
+    log("Remote md5 = #{remote_md5}")
     local_md5  != remote_md5
   end
 
@@ -160,13 +180,13 @@ class Tomboxs3
       }
     end
 
-    # pp "MANIFEST DATA"
+    log("MANIFEST DATA")
     manifest_data = {
       most_recent_sync_time: Time.now,
       num_files: json_array.length,
       files: json_array
     }
-    # pp manifest_data
+    log(manifest_data)
 
     File.write(MANIFEST_FILE_PATH, JSON.pretty_generate(manifest_data)) #manifest_data.to_json)
   end
@@ -176,8 +196,8 @@ class Tomboxs3
   end
  
   def manifest_items
-    # pp "MANIFEST ITEMS"
-    # pp manifest
+    log("MANIFEST ITEMS")
+    log(manifest)
     manifest["files"]
   end
  
@@ -212,23 +232,23 @@ class Tomboxs3
   end
 
   def upload_new_files(new_files)
-    # pp "UPLOAD NEW"
+    log("UPLOAD NEW")
     new_files.each do |file|
-      pp "-- Uploading new file #{file} to s3"
+      log("-- Uploading new file #{file} to s3")
       upload_file(file)
     end
   end
 
   def update_files(files_to_update)
-    # pp "UPDATE EXISTING"
+    log("UPDATE EXISTING")
     files_to_update.each do |file|
-      pp "-- Updating file #{file} on s3"
+      log("-- Updating file #{file} on s3")
       upload_file(file)
     end
   end
 
   def upload_file(filename)
-    # pp filename
+    log(filename)
     # Create the object to upload
     obj = @bucket.object(filename)
 
@@ -238,14 +258,14 @@ class Tomboxs3
     }
 
     # Upload it  
-    # pp "UPLOAD"
+    log("UPLOAD")
     obj.upload_file("#{MAGIC_DIR_PATH}/#{filename}", metadata: metadata)
   end
 
   def delete_files(files_to_delete)
     # TODO
     files_to_delete.each do |file| 
-      puts "--  Deleting file #{file} on s3"
+      log("--  Deleting file #{file} on s3")
       delete_file(file)
     end
   end
@@ -263,4 +283,4 @@ class Tomboxs3
 end # end class
 
 box = Tomboxs3.new(REGION, BUCKET_NAME)
-box.perform_sync
+box.monitor
